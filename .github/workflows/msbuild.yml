@@ -18,14 +18,11 @@ env:
   # Path to the solution file relative to the root of the project.
   SOLUTION_FILE_PATH: .  # Assumes solution is in the root
 
-  # Configuration type to build.
+  # Configuration type to build. Used in the Build step.
   BUILD_CONFIGURATION: Release
 
-  # Platform type to build.
+  # Platform type to build. Used in the Build step.
   BUILD_PLATFORM: x64 # Based on your output path 'x64\Release'
-
-  # Name of the executable file produced.
-  EXECUTABLE_NAME: Backstab.exe
 
   # Name of the folder to place the release executable in root.
   RELEASE_FOLDER: release
@@ -54,43 +51,62 @@ jobs:
 
     - name: Build
       working-directory: ${{env.GITHUB_WORKSPACE}}
-      # Add platform to the build command if needed by your project
-      # The output path seems to be implicitly '<Platform>\<Configuration>'
+      # Build command still uses Configuration and Platform env vars
       run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=${{env.BUILD_PLATFORM}} ${{env.SOLUTION_FILE_PATH}}
 
     - name: Copy Executable to Release Folder
       id: copy_exe
       run: |
-        # Construct the expected path based on environment variables and provided output structure
-        $sourceExePath = Join-Path -Path ${{ env.GITHUB_WORKSPACE }} -ChildPath '${{ env.BUILD_PLATFORM }}\${{ env.BUILD_CONFIGURATION }}\${{ env.EXECUTABLE_NAME }}'
+        # --- HARDCODED PATH ---
+        # The specific path to the executable relative to the workspace root.
+        $sourceExeRelativePath = 'x64\Release\Backstab.exe'
+        # Construct the FULL path using the GITHUB_WORKSPACE environment variable available in the runner
+        $sourceExeFullPath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath $sourceExeRelativePath
+        # --- END HARDCODED PATH ---
 
-        Write-Host "Looking for executable at: $sourceExePath"
+        Write-Host "Looking for executable at: $sourceExeFullPath"
 
-        if (-not (Test-Path $sourceExePath -PathType Leaf)) {
-          Write-Error "Executable not found at expected path: $sourceExePath. Please verify build output location."
+        if (-not (Test-Path $sourceExeFullPath -PathType Leaf)) {
+          Write-Error "Executable not found at hardcoded path: $sourceExeFullPath. Please verify build output location."
           # List directory contents for debugging help
-          Write-Host "Contents of ${{ env.BUILD_PLATFORM }}\${{ env.BUILD_CONFIGURATION }}\:"
-          Get-ChildItem -Path (Join-Path -Path ${{ env.GITHUB_WORKSPACE }} -ChildPath '${{ env.BUILD_PLATFORM }}\${{ env.BUILD_CONFIGURATION }}') -ErrorAction SilentlyContinue | Format-Table Name, Length, LastWriteTime
+          # Get the directory part from the relative path first
+          $expectedRelativeDir = Split-Path -Path $sourceExeRelativePath -Parent
+          $expectedFullDir = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath $expectedRelativeDir
+          Write-Host "Contents of expected directory '$expectedFullDir':"
+          Get-ChildItem -Path $expectedFullDir -ErrorAction SilentlyContinue | Format-Table Name, Length, LastWriteTime
           exit 1
         }
 
-        $targetDir = Join-Path -Path ${{ env.GITHUB_WORKSPACE }} -ChildPath ${{ env.RELEASE_FOLDER }}
+        # Construct the target directory and file path using the environment variable
+        $targetDir = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath ${{ env.RELEASE_FOLDER }}
+        $targetFile = Join-Path -Path $targetDir -ChildPath 'Backstab.exe' # Hardcoded filename
+
         New-Item -Path $targetDir -ItemType Directory -Force # Create directory if it doesn't exist
-        Copy-Item -Path $sourceExePath -Destination $targetDir -Force
-        Write-Host "Copied '$($sourceExePath.Split('\')[-1])' to '${{ env.RELEASE_FOLDER }}/' folder."
+        Copy-Item -Path $sourceExeFullPath -Destination $targetFile -Force # Copy specifically to target filename
+
+        # Get relative path for display message
+        $targetFileRelative = $targetFile.Replace($env:GITHUB_WORKSPACE + '\','')
+        Write-Host "Copied '$($sourceExeFullPath.Split('\')[-1])' to '$targetFileRelative'."
       shell: pwsh # Use PowerShell
 
     - name: Commit and Push Executable
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        git add ${{ env.RELEASE_FOLDER }}/${{ env.EXECUTABLE_NAME }}  # Stage the specific executable in the release folder
+
+        # --- HARDCODED FILENAME ---
+        $commitFileRelativePath = '${{ env.RELEASE_FOLDER }}/Backstab.exe'
+        # --- END HARDCODED FILENAME ---
+
+        git add $commitFileRelativePath # Stage the specific executable in the release folder
+
         # Check if there are changes to commit
         if (git diff --staged --quiet) {
-          echo "No changes in release executable to commit."
+          echo "No changes in $commitFileRelativePath to commit."
         } else {
-          echo "Changes detected in release executable. Committing..."
-          git commit -m "Auto-build: Update executable ${{ env.EXECUTABLE_NAME }} in ${{ env.RELEASE_FOLDER }} [skip ci]"
+          echo "Changes detected in $commitFileRelativePath. Committing..."
+          # Commit message also uses the hardcoded name
+          git commit -m "Auto-build: Update executable Backstab.exe in ${{ env.RELEASE_FOLDER }} [skip ci]"
           echo "Pushing changes to origin master..."
           git push origin master
           echo "Executable committed and pushed to master."
