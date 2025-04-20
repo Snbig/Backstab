@@ -3,35 +3,44 @@
 # separate terms of service, privacy policy, and support
 # documentation.
 
-name: MSBuild
+name: Build and Commit Executable
 
 on:
   push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+    branches: [ "master" ] # Only run on pushes to master
+
+# Prevent concurrent runs for the same branch, cancel older runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # Path to the solution file relative to the root of the project.
   SOLUTION_FILE_PATH: .
 
   # Configuration type to build.
-  # You can convert this to a build matrix if you need coverage of multiple configuration types.
-  # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
   BUILD_CONFIGURATION: Release
 
+  # Name of the folder to place the release executable in
+  RELEASE_FOLDER: release
+
 permissions:
-  contents: read
+  # Need write permissions to commit and push the executable
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+      # Fetch full history so we can push back later
+      with:
+        fetch-depth: 0
 
     - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v1.0.2
+      uses: microsoft/setup-msbuild@v2 # Updated to v2
 
     - name: Restore NuGet packages
       working-directory: ${{env.GITHUB_WORKSPACE}}
@@ -41,4 +50,43 @@ jobs:
       working-directory: ${{env.GITHUB_WORKSPACE}}
       # Add additional options to the MSBuild command line here (like platform or verbosity level).
       # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
+      # Ensure the output path is predictable or search for it later.
       run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}}
+
+    - name: Find and Copy Executable
+      id: find_copy_exe
+      run: |
+        # Search pattern: Look inside any 'bin\Release' or 'bin\Any_CPU\Release' etc. folders
+        # Exclude vshost.exe files which are for debugging.
+        # Adjust the Where-Object filter if your output path is different or if you have multiple EXEs.
+        $exePath = Get-ChildItem -Path . -Recurse -Filter *.exe | Where-Object { $_.DirectoryName -like "*\bin\${{env.BUILD_CONFIGURATION}}\*" -and $_.Name -notlike '*vshost.exe' } | Select-Object -First 1 -ExpandProperty FullName
+
+        if (-not $exePath) {
+          Write-Error "Executable not found in subdirectories under 'bin\${{env.BUILD_CONFIGURATION}}'. Please check build output path and search pattern."
+          exit 1
+        }
+
+        Write-Host "Found executable: $exePath"
+        $targetDir = Join-Path -Path ${{ env.GITHUB_WORKSPACE }} -ChildPath ${{ env.RELEASE_FOLDER }}
+        New-Item -Path $targetDir -ItemType Directory -Force # Create directory if it doesn't exist
+        Copy-Item -Path $exePath -Destination $targetDir
+        Write-Host "Copied '$($exePath.Split('\')[-1])' to '${{ env.RELEASE_FOLDER }}/' folder."
+      shell: pwsh # Use PowerShell
+
+    - name: Commit and Push Executable
+      run: |
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+        git add ${{ env.RELEASE_FOLDER }}/*  # Stage the contents of the release folder
+        # Check if there are changes to commit
+        # Use 'git diff --staged --quiet' which exits with 0 if no changes, 1 if changes
+        if (git diff --staged --quiet) {
+          echo "No changes in release executable to commit."
+        } else {
+          echo "Changes detected in release executable. Committing..."
+          git commit -m "Auto-build: Update executable in ${{ env.RELEASE_FOLDER }} [skip ci]"
+          # Use --force-with-lease for safer pushes if needed, but simple push is often ok here
+          git push origin master
+          echo "Executable committed and pushed to master."
+        }
+      shell: pwsh # Use PowerShell
